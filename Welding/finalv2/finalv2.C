@@ -1,0 +1,194 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     |
+    \\  /    A nd           | Copyright (C) 2011-2017 OpenFOAM Foundation
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+License
+    This file is part of OpenFOAM.
+
+    OpenFOAM is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+
+Application
+    laplacianFoam
+
+Group
+    grpBasicSolvers
+
+Description
+    Laplace equation solver for a scalar quantity.
+
+    \heading Solver details
+    The solver is applicable to, e.g. for thermal diffusion in a solid.  The
+    equation is given by:
+
+    \f[
+        \ddt{T}  = \div \left( D_T \grad T \right)
+    \f]
+
+    Where:
+    \vartable
+        T     | Scalar field which is solved for, e.g. temperature
+        D_T   | Diffusion coefficient
+    \endvartable
+
+    \heading Required fields
+    \plaintable
+        T     | Scalar field which is solved for, e.g. temperature
+    \endplaintable
+
+\*---------------------------------------------------------------------------*/
+
+#include "fvCFD.H"
+#include "fvOptions.H"
+#include "simpleControl.H"
+#include "Cartesian.h"
+#include "rectToPolar.h"
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+int main(int argc, char *argv[])
+{
+    //#include "addCheckCaseOptions.H"
+    #include "setRootCase.H"
+    #include "createTime.H"
+    #include "createMesh.H"
+    simpleControl simple(mesh);
+    #include "createFields.H"
+
+    scalar initialResidual = 0;
+    int iCorr=0;
+    volVectorField C = mesh.C();
+    double deltaTime=runTime.deltaT().value();
+    double totalTime=weldtime.value(); //runTime.endTime().value(); {Welding time}
+    double totalSteps=totalTime/deltaTime;
+    int flagCell=0;
+
+//    Info<< "Time of simulation = " << totalTime <<"s"<<nl << endl;
+//    Info<< "Total timesteps: = " << totalSteps << nl << endl;
+    
+//**************  READING SPIRAL COORDINATES FROM FILE *****************//   
+        int nline=0;
+        std::string line;        
+        std::ifstream myfile;
+        myfile.open("/home/satyam/SpiralData/oct10_2.txt");
+        if(myfile.is_open())
+        {
+            while(!myfile.eof())
+            {
+                getline(myfile,line);
+                nline++;
+            }
+            myfile.close();
+        }
+
+        cout<<"number of coordinates :"<<nline<<"\n";    
+        std::vector<Cartesian> spiral(nline); 
+        int t=0;
+        std::fstream inputfile;
+        inputfile.open("/home/satyam/SpiralData/oct10_2.txt");
+        while(!inputfile.eof())
+        {
+            inputfile>>spiral[t].x>>spiral[t].y;
+            spiral[t].z=0.05;
+            t++;
+        }
+        inputfile.close();
+
+//**************  FINDING THE CELL ID's CONTAINING SPIRAL COORDINATES *****************//   
+        std::vector<int> cellii(nline);
+        for (int t=0;t<nline;t++)
+        {
+            vector position(spiral[t].x, spiral[t].y, -0.0001);
+            cellii[t] = mesh.findCell(position);
+        }
+
+//*******************  KEEPING ONLY UNIQUE CELLID'S OF THE SPIRAL PATH  *********************//         
+        std::vector<int> spiralcells;
+        spiralcells=cellii;
+        // for (int i=1;i<cellii.size();i++)
+        // {
+        //     if ((cellii[i-1]!=cellii[i]) || i==1)
+        //     {
+        //             spiralcells.push_back(cellii[i]);
+        //     }
+        // }
+       
+        //PRINTS TOTAL NUMBER CELL TO MAKE SPIRAL   
+        Info<< "Total input:" << cellii.size() <<"\t" << "Unique: " << spiralcells.size() << nl << endl;
+        int spiCell=spiralcells.size();
+        int duration=totalSteps/spiCell;
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+    Info<< "\nCalculating temperature distribution\n" << endl;
+    
+    Info<< "Duration at each cell:"<< duration << endl;
+
+    while (simple.loop())
+    {
+        Info<< "Time = " << runTime.timeName() << nl << endl;
+        // p=p+1;
+        int flagCell=runTime.time().value()/deltaTime;
+        if(flagCell<=spiCell){
+            forAll (C, cellI)
+                {  
+                    #include "source.h"  // Type of heat source Double_Ell=source.h, Guassian surface=gaussianSource.h
+                }
+        }
+
+        flagCell++;     
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *//
+        while (simple.correctNonOrthogonal())
+        {
+	        iCorr = 0;
+	        do
+	        {   
+	            fvScalarMatrix TEqn
+	            (
+	                fvm::ddt(T) - fvm::laplacian(DT, T) + (LHF/Cp)*fvc::ddt(FL) + (LHV/Cp)*fvc::ddt(FV)  
+	             ==
+	                fvOptions(T) + g
+	            );
+
+	            fvOptions.constrain(TEqn);
+	            initialResidual = TEqn.solve().max().initialResidual();
+	            fvOptions.correct(T);
+	            
+	            // Double Enthalpy
+	            volScalarField FLNew = FL + FLrelax*(T-((TL-TS)*FL+TS))*Cp/LHF;
+	            FL = max(scalar(0), min(FLNew, scalar(1))); 
+	            volScalarField FVNew = FV + FVrelax*(T-((BT-BS)*FV+BS))*Cp/LHV;
+	            FV = max(scalar(0), min(FVNew, scalar(1))); 
+	            
+			} while (initialResidual > convergenceTempTolerance && ++iCorr < nTempCorr);
+        }
+
+        runTime.write();
+        #include "write.H"  // Uncomment to obtain gradT 
+
+        Info<< "ExecutionTime = " << runTime.elapsedCpuTime() << " s"
+            << "  ClockTime = " << runTime.elapsedClockTime() << " s"
+            << nl << endl;
+    }
+
+    Info << "End\n" << endl;
+    return 0;
+}
+
+
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *//
